@@ -1,9 +1,13 @@
 use imageproc::drawing::draw_text;
+use imageproc::definitions::Image;
 use rusttype::{Font, Scale, Point};
 use image::io::Reader as ImageReader;
-use image::{GenericImage, GenericImageView, Rgba};
-use std::io::Result;
+use image::{GenericImageView, Rgba};
+use std::io::{Result, Cursor};
 use std::str::FromStr;
+use clap::{Arg, App};
+
+const COLOR: Rgba<u8> = Rgba([255, 255, 255, 1]);
 
 fn get_text_width(font: &Font, text: &str, scale: Scale) -> u32 {
   let layout_iter = font.layout(text, scale, Point{ x: 0.0, y: 0.0 });
@@ -21,44 +25,59 @@ fn get_text_width(font: &Font, text: &str, scale: Scale) -> u32 {
 }
 
 fn get_text_lines(text: &str, font: &Font, scale: Scale, img_width: u32) -> Vec<String> {
-  let layout_iter = font.layout(text, scale, Point{x: 0.0, y: 0.0});
+  let text: String = String::from_str(text.trim()).unwrap();
+  let layout_iter = font.layout(&text, scale, Point{x: 0.0, y: 0.0});
   let mut lines = vec![];
+  let mut current_word_start = 0;
+  let mut current_word_length = 0;
   let mut finish: u32 = 0;
-  let mut last_chr_index: usize = 0;
+  let mut finish_previous_line: u32 = 0;
+  let mut last_segment_index: usize = 0;
 
   for (index, glyph) in layout_iter.enumerate() {
-    finish = glyph.position().x as u32;
-
     match glyph.pixel_bounding_box() {
-        Some(bounding_box ) => finish += bounding_box.width() as u32,
-        None => {
-          if finish > img_width {
-            let mut splitted = String::from_str(text).unwrap();
-            splitted.truncate(index);
-            let splitted = splitted.split_off(last_chr_index);
-            lines.push(splitted);
-            last_chr_index = index;
-            finish = 0;
-          }
+      Some(bounding_box ) => {
+        current_word_length += bounding_box.width() as u32;
+      },
+      None => {
+        //finish = glyph.position().x as u32 - finish_previous_line;
+        if (finish + current_word_length) > img_width {
+          let mut split = text.clone();
+          split.truncate(current_word_start - 1);
+          let split = split.split_off(last_segment_index);
+          lines.push(split);
+          last_segment_index = current_word_start - 1;
+          finish_previous_line += finish;
+          finish = 0;
+        } else {
+          finish = current_word_length + (glyph.position().x as u32 - finish_previous_line);
+          current_word_start = index + 1;
+          current_word_length = 0;
         }
+      }
+    }
+
+    if index == text.len() - 1 {
+      let mut split = text.clone();
+      split.truncate(text.len());
+      let split = split.split_off(last_segment_index);
+      lines.push(split);
     }
   }
 
   lines
 }
 
-fn main() -> Result<()> {
-  let mut img = ImageReader::open("wiitu.jpeg")?.decode().unwrap();
-  let font_data = include_bytes!("font.ttf");
-  let font = Font::try_from_bytes(font_data).unwrap();
-  let scale = Scale{ x: 40.0, y: 40.0 };
-  let color: Rgba<u8> = Rgba([255, 255, 255, 1]);
+fn get_base_image_template(font: &Font, scale: Scale) -> Image<Rgba<u8>> {
+  let mut img = ImageReader::new(
+    Cursor::new(include_bytes!("wiitu.jpeg"))
+  ).with_guessed_format().unwrap().decode().unwrap();
 
   let finish = get_text_width(&font, "WHAT IF I TOLD YOU", scale);
   let x = (img.width() / 2) - (finish / 2);
-  let mut out = draw_text(
+  let out = draw_text(
     &mut img,
-    color, 
+    COLOR,
     x,
     10,
     scale,
@@ -66,22 +85,63 @@ fn main() -> Result<()> {
     "WHAT IF I TOLD YOU"
   );
 
-  let lines = get_text_lines("WHAT IF I TOLD YOU THAT YOU CAN SLEEP WITHOUT SNORING QWDQ QWDQWDQ QWD QWQWD QQWEQ WE", &font, scale, img.width());
-  println!("{:?}", lines);
+  out
+}
 
-  let finish: u32 = get_text_width(&font, "THAT YOU CAN SLEEP WITHOUT SNORING", scale);
-  let x = (img.width() / 2) - (finish / 2);
-  let out = draw_text(
-    &mut out,
-    color,
-    x,
-    img.height() - 70,
-    scale,
-    &font,
-    "THAT YOU CAN SLEEP WITHOUT SNORING"
-  );
+fn print_text_into_image(img: Image<Rgba<u8>>, text: &str, font: &Font, scale: Scale) -> Image<Rgba<u8>> {
+  let lines = get_text_lines(text, font, scale, img.width());
+  let v_metrics = font.v_metrics(scale);
+  let mut out = img;
 
-  out.save("wiitu_out.jpeg").unwrap();
+  for (index, line) in lines.into_iter().rev().enumerate() {
+    let finish = get_text_width(&font, &line, scale);
+    let line_height = (v_metrics.ascent - v_metrics.descent + v_metrics.line_gap) as u32;
+    let x = (out.width() / 2) - (finish / 2);
+    let y = out.height() - 70 - (line_height * index as u32);
+
+    out = draw_text(
+      &mut out,
+      COLOR,
+      x,
+      y,
+      scale,
+      &font,
+      &line
+    );
+  }
+
+  out
+}
+
+fn main() -> Result<()> {
+  let matches = App::new("wiitu")
+      .version("0.1.0")
+      .author("Some Guy <someguy@smail.com>")
+      .about("Generates a \"What if I told you that ...\" meme featuring Morpheus in the movie The Matrix")
+      .arg(
+        Arg::with_name("text")
+            .short("t")
+            .long("text")
+            .value_name("TEXT")
+            .help("Enter the text to be shown")
+            .required(true)
+      )
+      .get_matches();
+
+  let text = matches.value_of("text");
+  if text == None {
+    eprintln!("Error - no text is provided");
+    std::process::exit(1);
+  }
+
+  let text = text.unwrap();
+  let font = Font::try_from_bytes(include_bytes!("font.ttf")).unwrap();
+  let scale = Scale{ x: 40.0, y: 40.0 };
+
+  let img = get_base_image_template(&font, scale);
+  let img = print_text_into_image(img, text, &font, scale);
+
+  img.save("wiitu_out.jpeg").unwrap();
 
   Ok(())
 }
